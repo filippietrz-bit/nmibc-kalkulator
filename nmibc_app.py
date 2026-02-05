@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import google.generativeai as genai
 import os
+import time
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
@@ -30,8 +31,10 @@ st.markdown("""
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
-    # ZMIANA: Używamy modelu 1.5-flash (stabilniejszy, lepsze limity darmowe)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    # ZMIANA: Używamy najlżejszego modelu 'gemini-1.5-flash-8b'
+    # Jest najmniej podatny na przeciążenia w wersji darmowej
+    model = genai.GenerativeModel('gemini-1.5-flash-8b')
     ai_available = True
 except Exception:
     ai_available = False
@@ -163,15 +166,16 @@ with col_result:
                 Wyjaśnij prostym językiem diagnozę, leczenie i konieczność kontroli ({result['followup']}).
                 Bądź konkretny ale uspokajający. Używaj języka polskiego.
                 """
-                # ZABEZPIECZENIE PRZED BŁĘDAMI QUOTA (ResourceExhausted)
                 try:
+                    # Dodatkowy delay, aby nie spamować API
+                    time.sleep(0.5) 
                     response = model.generate_content(prompt)
                     st.success("Gotowe!")
                     st.text_area("List dla pacjenta (do skopiowania):", value=response.text, height=300)
                 except Exception as e:
-                    st.error("⚠️ Serwer AI jest obecnie przeciążony (wyczerpany limit zapytań). Spróbuj ponownie za chwilę.")
+                    st.error("⚠️ Serwer AI jest przeciążony (Quota Limit). Odczekaj minutę i spróbuj ponownie.")
     else:
-        st.warning("Skonfiguruj klucz API Gemini, aby używać funkcji AI.")
+        st.warning("Skonfiguruj klucz API Gemini w Secrets, aby używać funkcji AI.")
 
     st.subheader("💉 Plan Leczenia")
     st.write(f"**Zalecenie:** {result['treatment']}")
@@ -208,13 +212,13 @@ with col_result:
 
                 context = f"Pacjent: {form_data['age']}, {form_data['tCategory']} {form_data['grade']}, Grupa: {result['level']}. Pytanie: {prompt}"
                 
-                # ZABEZPIECZENIE CHATU
                 try:
+                    time.sleep(0.5) # Lekkie opóźnienie dla stabilności
                     ai_reply = model.generate_content(context).text
                     st.session_state.messages.append({"role": "assistant", "content": ai_reply})
                     st.rerun()
                 except Exception as e:
-                    st.error("⚠️ Błąd połączenia z AI (limit zapytań).")
+                    st.error("⚠️ Limit zapytań wyczerpany. Spróbuj później.")
 
     st.markdown("""
     <div class="footer">
