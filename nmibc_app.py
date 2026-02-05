@@ -2,8 +2,9 @@ import streamlit as st
 from datetime import datetime, timedelta
 import pandas as pd
 import google.generativeai as genai
-import os
+import google.api_core.exceptions
 import time
+import os
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
@@ -31,13 +32,29 @@ st.markdown("""
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
-    
-    # ZMIANA: Używamy najlżejszego modelu 'gemini-1.5-flash-8b'
-    # Jest najmniej podatny na przeciążenia w wersji darmowej
-    model = genai.GenerativeModel('gemini-1.5-flash-8b')
+    # Wracamy do standardowego modelu 1.5-flash (najbardziej stabilny)
+    model = genai.GenerativeModel('gemini-1.5-flash')
     ai_available = True
-except Exception:
+except Exception as e:
     ai_available = False
+    ai_error_msg = str(e)
+
+# --- FUNKCJA AI Z CACHE I RETRY ---
+# To kluczowa funkcja - zapamiętuje wynik dla danego promptu, żeby nie marnować limitu
+@st.cache_data(show_spinner=False, ttl=3600)
+def generate_ai_content_with_retry(prompt_text):
+    retries = 3
+    for attempt in range(retries):
+        try:
+            response = model.generate_content(prompt_text)
+            return response.text
+        except google.api_core.exceptions.ResourceExhausted:
+            # Jeśli limit wyczerpany, czekaj coraz dłużej (2s, 4s, 8s)
+            wait_time = 2 ** (attempt + 1)
+            time.sleep(wait_time)
+        except Exception as e:
+            return f"Błąd: {str(e)}"
+    return "Serwery Google są obecnie bardzo obciążone (Błąd 429). Spróbuj ponownie za kilka minut."
 
 # --- BAZA PROTOKOŁÓW (EAU 2025) ---
 PROTOCOLS = {
@@ -74,10 +91,8 @@ PROTOCOLS = {
     }
 }
 
-# --- FUNKCJA OBLICZANIA RYZYKA ---
 def calculate_risk(data, crf_count):
     if data['hasLVI'] or data['hasVariantHistology'] or data['hasProstaticCIS']: return 'veryHigh'
-    
     is_very_high_table = False
     if data['hasCIS']:
         if data['tCategory'] == 'Ta' and data['grade'] == 'HG' and crf_count == 3: is_very_high_table = True
@@ -85,7 +100,6 @@ def calculate_risk(data, crf_count):
     else:
         if data['tCategory'] == 'T1' and data['grade'] == 'HG' and crf_count == 3: is_very_high_table = True
     if is_very_high_table: return 'veryHigh'
-
     is_high = False
     if data['tCategory'] == 'Tis' or data['hasCIS']: is_high = True
     if data['tCategory'] == 'T1' and data['grade'] == 'HG': is_high = True
@@ -94,11 +108,9 @@ def calculate_risk(data, crf_count):
         if data['tCategory'] == 'Ta' and data['grade'] == 'HG' and crf_count >= 2: is_high = True
         if data['tCategory'] == 'T1' and data['grade'] == 'LG' and crf_count >= 2: is_high = True
     if is_high: return 'high'
-
     if data['isPrimary'] and not data['hasCIS'] and data['tCategory'] == 'Ta' and data['grade'] == 'LG':
         if (data['tumorCount'] == 'single' and data['tumorSize'] == '<3cm' and data['age'] == '<=70') or crf_count <= 1:
             return 'low'
-
     return 'intermediate'
 
 # --- INTERFEJS UŻYTKOWNIKA ---
@@ -166,16 +178,19 @@ with col_result:
                 Wyjaśnij prostym językiem diagnozę, leczenie i konieczność kontroli ({result['followup']}).
                 Bądź konkretny ale uspokajający. Używaj języka polskiego.
                 """
-                try:
-                    # Dodatkowy delay, aby nie spamować API
-                    time.sleep(0.5) 
-                    response = model.generate_content(prompt)
-                    st.success("Gotowe!")
-                    st.text_area("List dla pacjenta (do skopiowania):", value=response.text, height=300)
-                except Exception as e:
-                    st.error("⚠️ Serwer AI jest przeciążony (Quota Limit). Odczekaj minutę i spróbuj ponownie.")
+                # Użycie funkcji z cache i retry
+                ai_response_text = generate_ai_content_with_retry(prompt)
+                
+                if "Błąd" in ai_response_text or "obciążone" in ai_response_text:
+                     st.error(ai_response_text)
+                else:
+                     st.success("Gotowe!")
+                     st.text_area("List dla pacjenta (do skopiowania):", value=ai_response_text, height=300)
     else:
-        st.warning("Skonfiguruj klucz API Gemini w Secrets, aby używać funkcji AI.")
+        st.warning("⚠️ Funkcje AI niedostępne.")
+        if 'ai_error_msg' in locals():
+            st.error(f"Szczegóły błędu konfiguracji: {ai_error_msg}")
+            st.info("Sprawdź czy w Secrets masz wpisany poprawny GEMINI_API_KEY")
 
     st.subheader("💉 Plan Leczenia")
     st.write(f"**Zalecenie:** {result['treatment']}")
@@ -212,13 +227,11 @@ with col_result:
 
                 context = f"Pacjent: {form_data['age']}, {form_data['tCategory']} {form_data['grade']}, Grupa: {result['level']}. Pytanie: {prompt}"
                 
-                try:
-                    time.sleep(0.5) # Lekkie opóźnienie dla stabilności
-                    ai_reply = model.generate_content(context).text
-                    st.session_state.messages.append({"role": "assistant", "content": ai_reply})
-                    st.rerun()
-                except Exception as e:
-                    st.error("⚠️ Limit zapytań wyczerpany. Spróbuj później.")
+                # Użycie funkcji z cache (chociaż dla czatu cache działa tylko na identyczne pytania)
+                ai_reply = generate_ai_content_with_retry(context)
+                
+                st.session_state.messages.append({"role": "assistant", "content": ai_reply})
+                st.rerun()
 
     st.markdown("""
     <div class="footer">
