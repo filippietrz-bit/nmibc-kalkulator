@@ -27,11 +27,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- KONFIGURACJA GEMINI API ---
-# Klucz będzie pobierany z "Secrets" w Streamlit Cloud dla bezpieczeństwa
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    # ZMIANA: Używamy modelu 1.5-flash (stabilniejszy, lepsze limity darmowe)
+    model = genai.GenerativeModel('gemini-1.5-flash')
     ai_available = True
 except Exception:
     ai_available = False
@@ -163,9 +163,13 @@ with col_result:
                 Wyjaśnij prostym językiem diagnozę, leczenie i konieczność kontroli ({result['followup']}).
                 Bądź konkretny ale uspokajający. Używaj języka polskiego.
                 """
-                response = model.generate_content(prompt)
-                st.success("Gotowe!")
-                st.text_area("List dla pacjenta (do skopiowania):", value=response.text, height=300)
+                # ZABEZPIECZENIE PRZED BŁĘDAMI QUOTA (ResourceExhausted)
+                try:
+                    response = model.generate_content(prompt)
+                    st.success("Gotowe!")
+                    st.text_area("List dla pacjenta (do skopiowania):", value=response.text, height=300)
+                except Exception as e:
+                    st.error("⚠️ Serwer AI jest obecnie przeciążony (wyczerpany limit zapytań). Spróbuj ponownie za chwilę.")
     else:
         st.warning("Skonfiguruj klucz API Gemini, aby używać funkcji AI.")
 
@@ -203,10 +207,14 @@ with col_result:
                 st.markdown(f"<div class='chat-message chat-user'>{prompt}</div>", unsafe_allow_html=True)
 
                 context = f"Pacjent: {form_data['age']}, {form_data['tCategory']} {form_data['grade']}, Grupa: {result['level']}. Pytanie: {prompt}"
-                ai_reply = model.generate_content(context).text
                 
-                st.session_state.messages.append({"role": "assistant", "content": ai_reply})
-                st.rerun()
+                # ZABEZPIECZENIE CHATU
+                try:
+                    ai_reply = model.generate_content(context).text
+                    st.session_state.messages.append({"role": "assistant", "content": ai_reply})
+                    st.rerun()
+                except Exception as e:
+                    st.error("⚠️ Błąd połączenia z AI (limit zapytań).")
 
     st.markdown("""
     <div class="footer">
