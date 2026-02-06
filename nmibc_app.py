@@ -28,33 +28,73 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- KONFIGURACJA GEMINI API ---
+# --- KONFIGURACJA GEMINI API (AUTO-SELEKCJA MODELU) ---
+model = None
+ai_available = False
+ai_error_msg = ""
+
+def get_best_model():
+    """Automatycznie wybiera najlepszy dostępny model dla danego klucza API."""
+    try:
+        # Pobierz listę modeli dostępnych dla klucza
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # Lista preferencji (od najszybszego/najnowszego)
+        preferences = [
+            'gemini-1.5-flash', 
+            'gemini-1.5-flash-001', 
+            'gemini-1.5-flash-latest',
+            'gemini-pro', 
+            'gemini-1.0-pro'
+        ]
+        
+        # Szukaj pierwszego pasującego
+        for pref in preferences:
+            match = next((m for m in available_models if m.endswith(pref)), None)
+            if match:
+                return match
+        
+        # Fallback: zwróć pierwszy lepszy, jeśli żaden z preferowanych nie pasuje
+        return available_models[0] if available_models else None
+    except Exception as e:
+        return None
+
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=api_key)
-    # Wracamy do standardowego modelu 1.5-flash (najbardziej stabilny)
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    ai_available = True
+    if "GEMINI_API_KEY" in st.secrets:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        genai.configure(api_key=api_key)
+        
+        best_model_name = get_best_model()
+        
+        if best_model_name:
+            model = genai.GenerativeModel(best_model_name)
+            ai_available = True
+            # Debug: wyświetl w logach serwera, jaki model wybrano
+            print(f"Wybrano model AI: {best_model_name}")
+        else:
+            ai_error_msg = "Nie znaleziono żadnego dostępnego modelu Gemini dla tego klucza."
+    else:
+        ai_error_msg = "Brak klucza API w Secrets."
 except Exception as e:
     ai_available = False
     ai_error_msg = str(e)
 
 # --- FUNKCJA AI Z CACHE I RETRY ---
-# To kluczowa funkcja - zapamiętuje wynik dla danego promptu, żeby nie marnować limitu
 @st.cache_data(show_spinner=False, ttl=3600)
 def generate_ai_content_with_retry(prompt_text):
+    if not model: return "Błąd: Model AI nie został zainicjalizowany."
+    
     retries = 3
     for attempt in range(retries):
         try:
             response = model.generate_content(prompt_text)
             return response.text
         except google.api_core.exceptions.ResourceExhausted:
-            # Jeśli limit wyczerpany, czekaj coraz dłużej (2s, 4s, 8s)
             wait_time = 2 ** (attempt + 1)
             time.sleep(wait_time)
         except Exception as e:
-            return f"Błąd: {str(e)}"
-    return "Serwery Google są obecnie bardzo obciążone (Błąd 429). Spróbuj ponownie za kilka minut."
+            return f"Błąd AI: {str(e)}"
+    return "Serwery Google są obecnie bardzo obciążone (Quota Limit). Spróbuj ponownie później."
 
 # --- BAZA PROTOKOŁÓW (EAU 2025) ---
 PROTOCOLS = {
@@ -178,19 +218,17 @@ with col_result:
                 Wyjaśnij prostym językiem diagnozę, leczenie i konieczność kontroli ({result['followup']}).
                 Bądź konkretny ale uspokajający. Używaj języka polskiego.
                 """
-                # Użycie funkcji z cache i retry
                 ai_response_text = generate_ai_content_with_retry(prompt)
                 
-                if "Błąd" in ai_response_text or "obciążone" in ai_response_text:
+                if "Błąd" in ai_response_text:
                      st.error(ai_response_text)
                 else:
                      st.success("Gotowe!")
                      st.text_area("List dla pacjenta (do skopiowania):", value=ai_response_text, height=300)
     else:
-        st.warning("⚠️ Funkcje AI niedostępne.")
-        if 'ai_error_msg' in locals():
-            st.error(f"Szczegóły błędu konfiguracji: {ai_error_msg}")
-            st.info("Sprawdź czy w Secrets masz wpisany poprawny GEMINI_API_KEY")
+        st.warning("⚠️ Funkcje AI są obecnie niedostępne.")
+        if ai_error_msg:
+            st.error(f"Komunikat systemu: {ai_error_msg}")
 
     st.subheader("💉 Plan Leczenia")
     st.write(f"**Zalecenie:** {result['treatment']}")
@@ -227,7 +265,6 @@ with col_result:
 
                 context = f"Pacjent: {form_data['age']}, {form_data['tCategory']} {form_data['grade']}, Grupa: {result['level']}. Pytanie: {prompt}"
                 
-                # Użycie funkcji z cache (chociaż dla czatu cache działa tylko na identyczne pytania)
                 ai_reply = generate_ai_content_with_retry(context)
                 
                 st.session_state.messages.append({"role": "assistant", "content": ai_reply})
